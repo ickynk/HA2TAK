@@ -1,0 +1,6 @@
+send_now:
+  name: Send now
+  description: >-
+    Immediately build and send CoT position reports for all configured
+    entities to every configured TAK server, without waiting for the next
+    reporting interval.

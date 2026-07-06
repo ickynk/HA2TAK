@@ -1,0 +1,161 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to a TAK server",
+        "description": "HA2TAK sends Cursor-on-Target (CoT) position reports for selected Home Assistant entities to a TAK server. Plain TCP normally uses port 8087, TLS (with client certificates) port 8089. Certificate paths are relative to the Home Assistant configuration folder (e.g. `ssl/tak_ca.pem`) unless absolute.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "protocol": "Protocol",
+          "tls_ca_file": "CA / truststore file (PEM, TLS only)",
+          "tls_cert_file": "Client certificate file (PEM, TLS only)",
+          "tls_key_file": "Client key file (PEM, TLS only)",
+          "tls_p12_file": "Client certificate bundle (.p12, TLS only)",
+          "tls_p12_password": "Password for the .p12 bundle",
+          "tls_verify": "Verify the server certificate",
+          "tls_check_hostname": "Verify the server hostname"
+        },
+        "data_description": {
+          "host": "Hostname or IP address of the TAK server.",
+          "protocol": "TAK Server silently drops data sent with the wrong protocol — TCP for port 8087, TLS for port 8089.",
+          "tls_p12_file": "A PKCS#12 bundle from TAK Server enrollment or a data package. Used instead of separate certificate/key files. TAK bundles often use the password 'atakatak'.",
+          "tls_check_hostname": "TAK server certificates are usually issued for an internal name, so hostname verification is off by default (like ATAK/iTAK)."
+        }
+      },
+      "reconfigure": {
+        "title": "Update the TAK server connection",
+        "description": "Change the connection settings for this TAK server. Certificate paths are relative to the Home Assistant configuration folder unless absolute.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "protocol": "Protocol",
+          "tls_ca_file": "CA / truststore file (PEM, TLS only)",
+          "tls_cert_file": "Client certificate file (PEM, TLS only)",
+          "tls_key_file": "Client key file (PEM, TLS only)",
+          "tls_p12_file": "Client certificate bundle (.p12, TLS only)",
+          "tls_p12_password": "Password for the .p12 bundle",
+          "tls_verify": "Verify the server certificate",
+          "tls_check_hostname": "Verify the server hostname"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to the TAK server: {error}",
+      "invalid_certificate": "The server certificate could not be verified: {error}",
+      "invalid_tls_config": "TLS configuration problem: {error}"
+    },
+    "abort": {
+      "already_configured": "This TAK server is already configured.",
+      "reconfigure_successful": "The connection settings were updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HA2TAK",
+        "menu_options": {
+          "add_entity": "Add an entity to report to TAK",
+          "edit_entity": "Edit a reported entity",
+          "remove_entity": "Remove reported entities",
+          "settings": "Reporting settings"
+        }
+      },
+      "settings": {
+        "title": "Reporting settings",
+        "data": {
+          "report_interval": "Reporting interval",
+          "stale_seconds": "Stale time",
+          "send_on_update": "Also report immediately when an entity's location updates"
+        },
+        "data_description": {
+          "report_interval": "How often position reports are sent to the TAK server.",
+          "stale_seconds": "How long TAK clients keep a report before marking it stale. Use at least 2–3× the reporting interval."
+        }
+      },
+      "add_entity": {
+        "title": "Add an entity",
+        "description": "Pick a person, device tracker or zone to report to the TAK server, and choose how TAK should see it.",
+        "data": {
+          "entity_id": "Entity",
+          "mode": "Show in TAK as"
+        }
+      },
+      "edit_entity": {
+        "title": "Edit a reported entity",
+        "data": {
+          "entity_id": "Entity"
+        }
+      },
+      "mode": {
+        "title": "How should TAK see {entity}?",
+        "data": {
+          "mode": "Show in TAK as"
+        }
+      },
+      "contact": {
+        "title": "Contact settings",
+        "description": "{entity} will appear in the TAK contacts list like a team member running ATAK.",
+        "data": {
+          "callsign": "Call sign",
+          "team_color": "Team color",
+          "team_role": "Team role",
+          "remarks": "Remarks"
+        },
+        "data_description": {
+          "callsign": "The name shown on the TAK map and in the contacts list.",
+          "remarks": "Optional free text attached to every report."
+        }
+      },
+      "marker": {
+        "title": "Marker settings",
+        "description": "{entity} will appear as a map marker of the selected type.",
+        "data": {
+          "callsign": "Marker name (call sign)",
+          "cot_type": "Marker type",
+          "remarks": "Remarks"
+        },
+        "data_description": {
+          "remarks": "Optional free text attached to every report."
+        }
+      },
+      "remove_entity": {
+        "title": "Remove reported entities",
+        "data": {
+          "entity_ids": "Entities to remove"
+        }
+      }
+    },
+    "error": {
+      "already_tracked": "That entity is already being reported. Use 'Edit a reported entity' to change it."
+    }
+  },
+  "selector": {
+    "protocol": {
+      "options": {
+        "tcp": "TCP (plain, TAK port 8087)",
+        "tls": "TLS (encrypted, TAK port 8089)",
+        "udp": "UDP"
+      }
+    },
+    "mode": {
+      "options": {
+        "contact": "Contact (appears in the contacts list, with team color and role)",
+        "marker": "Mission marker (map symbol of a chosen type)"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "last_report": {
+        "name": "Last report"
+      }
+    }
+  },
+  "services": {
+    "send_now": {
+      "name": "Send now",
+      "description": "Immediately build and send CoT position reports for all configured entities to every configured TAK server, without waiting for the next reporting interval."
+    }
+  }
+}
