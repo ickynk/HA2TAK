@@ -3,51 +3,83 @@
     "step": {
       "user": {
         "title": "Connect to a TAK server",
-        "description": "HA2TAK sends Cursor-on-Target (CoT) position reports for selected Home Assistant entities to a TAK server. Plain TCP normally uses port 8087, TLS (with client certificates) port 8089. Certificate paths are relative to the Home Assistant configuration folder (e.g. `ssl/tak_ca.pem`) unless absolute.",
+        "description": "HA2TAK sends Cursor-on-Target (CoT) position reports for selected Home Assistant entities to a TAK server. TAK Server normally takes plain TCP on port 8087 and TLS on port 8089. With TLS you'll choose next between signing in with a username and password or using certificate files.",
         "data": {
           "host": "Host",
           "port": "Port",
-          "protocol": "Protocol",
-          "tls_ca_file": "CA / truststore file (PEM, TLS only)",
-          "tls_cert_file": "Client certificate file (PEM, TLS only)",
-          "tls_key_file": "Client key file (PEM, TLS only)",
-          "tls_p12_file": "Client certificate bundle (.p12, TLS only)",
-          "tls_p12_password": "Password for the .p12 bundle",
+          "protocol": "Protocol"
+        },
+        "data_description": {
+          "host": "Hostname or IP address of the TAK server.",
+          "protocol": "TAK Server silently drops data sent with the wrong protocol — TCP for port 8087, TLS for port 8089."
+        }
+      },
+      "tls_method": {
+        "title": "How should Home Assistant authenticate?",
+        "description": "TLS connections to TAK Server need a client certificate.",
+        "menu_options": {
+          "tls_enroll": "Username and password (get a certificate from the server, like ATAK)",
+          "tls_certificates": "Certificate files (PEM or .p12 I already have)"
+        }
+      },
+      "tls_enroll": {
+        "title": "Sign in to {host}",
+        "description": "Home Assistant enrolls with the TAK server using your TAK account, exactly like ATAK's 'Enroll for client certificate'. The server issues a client certificate that is used for the TLS connection and renewed automatically before it expires. The username becomes the certificate's identity on the server.",
+        "data": {
+          "username": "Username",
+          "password": "Password",
+          "enrollment_port": "Enrollment port",
+          "tls_ca_file": "CA / truststore file (PEM, optional)",
           "tls_verify": "Verify the server certificate",
           "tls_check_hostname": "Verify the server hostname"
         },
         "data_description": {
-          "host": "Hostname or IP address of the TAK server.",
-          "protocol": "TAK Server silently drops data sent with the wrong protocol — TCP for port 8087, TLS for port 8089.",
-          "tls_p12_file": "A PKCS#12 bundle from TAK Server enrollment or a data package. Used instead of separate certificate/key files. TAK bundles often use the password 'atakatak'.",
+          "password": "When changing an existing connection, leave empty to keep the stored password.",
+          "enrollment_port": "TAK Server's certificate enrollment API, normally 8446.",
+          "tls_verify": "Turn off only if the enrollment port uses a self-signed certificate and you have no CA file for it. Your password is sent to this server.",
+          "tls_ca_file": "Your TAK server's CA certificate. Leave empty to use the CA chain the server hands out at enrollment (or the system trust store).",
           "tls_check_hostname": "TAK server certificates are usually issued for an internal name, so hostname verification is off by default (like ATAK/iTAK)."
         }
       },
-      "reconfigure": {
-        "title": "Update the TAK server connection",
-        "description": "Change the connection settings for this TAK server. Certificate paths are relative to the Home Assistant configuration folder unless absolute.",
+      "tls_certificates": {
+        "title": "Client certificate files",
+        "description": "Paths are relative to the Home Assistant configuration folder (e.g. `ssl/tak_ca.pem`) unless absolute. Use either a PEM certificate and key, or a .p12 bundle.",
         "data": {
-          "host": "Host",
-          "port": "Port",
-          "protocol": "Protocol",
-          "tls_ca_file": "CA / truststore file (PEM, TLS only)",
-          "tls_cert_file": "Client certificate file (PEM, TLS only)",
-          "tls_key_file": "Client key file (PEM, TLS only)",
-          "tls_p12_file": "Client certificate bundle (.p12, TLS only)",
+          "tls_cert_file": "Client certificate file (PEM)",
+          "tls_key_file": "Client key file (PEM)",
+          "tls_p12_file": "Client certificate bundle (.p12)",
           "tls_p12_password": "Password for the .p12 bundle",
+          "tls_ca_file": "CA / truststore file (PEM, optional)",
           "tls_verify": "Verify the server certificate",
           "tls_check_hostname": "Verify the server hostname"
+        },
+        "data_description": {
+          "tls_p12_file": "A PKCS#12 bundle from TAK Server enrollment or a data package. TAK bundles often use the password 'atakatak'.",
+          "tls_ca_file": "Your TAK server's CA certificate. Leave empty to use the CA chain the server hands out at enrollment (or the system trust store).",
+          "tls_check_hostname": "TAK server certificates are usually issued for an internal name, so hostname verification is off by default (like ATAK/iTAK)."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in to {host} again",
+        "description": "The TAK server rejected the stored username or password while renewing the client certificate. Enter the current credentials.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
         }
       }
     },
     "error": {
       "cannot_connect": "Could not connect to the TAK server: {error}",
+      "cannot_connect_enrollment": "Could not reach the TAK server's enrollment service: {error}",
+      "invalid_auth": "The TAK server rejected the username or password.",
+      "enrollment_failed": "Certificate enrollment failed: {error}",
       "invalid_certificate": "The server certificate could not be verified: {error}",
       "invalid_tls_config": "TLS configuration problem: {error}"
     },
     "abort": {
       "already_configured": "This TAK server is already configured.",
-      "reconfigure_successful": "The connection settings were updated."
+      "reconfigure_successful": "The connection settings were updated.",
+      "reauth_successful": "Signed in again; a new client certificate was issued."
     }
   },
   "options": {

@@ -14,9 +14,13 @@ native integration with full UI configuration.
 
 - **UI-only setup** — no YAML. Configure the TAK server connection, then
   pick entities from a menu.
-- **TCP, TLS and UDP** delivery. TLS supports a CA/truststore file, a PEM
-  client certificate + key, or a **.p12 bundle** straight from TAK Server
-  enrollment / data packages (default password is usually `atakatak`).
+- **TCP, TLS and UDP** delivery. For TLS, authenticate either with
+  - a **username and password** — Home Assistant enrolls with the TAK
+    server for a client certificate exactly like ATAK's *"Enroll for client
+    certificate"*, and **renews it automatically** before it expires; or
+  - **certificate files** — a CA/truststore file plus a PEM client
+    certificate + key, or a **.p12 bundle** from a TAK Server data package
+    (default password is usually `atakatak`).
 - **Persistent connection**, like a real TAK client — contacts stay
   "online" on the server, and a rejected client certificate is detected
   instead of silently dropped.
@@ -53,24 +57,53 @@ folder and restart Home Assistant.
 ## Setup
 
 1. **Settings → Devices & services → Add integration → HA2TAK.**
-2. Enter your TAK server connection:
+2. Enter the server: **host**, **port** and **protocol**. TAK Server takes
+   plain TCP on **8087** and TLS on **8089**; bytes sent with the wrong
+   protocol are **silently discarded** by the server.
+3. For **TLS**, choose how Home Assistant authenticates:
+
+   **Username and password** (recommended when your TAK account allows
+   certificate enrollment):
 
    | Field | Notes |
    |---|---|
-   | Host / Port | TAK Server: plain TCP on **8087**, TLS on **8089**. Bytes sent with the wrong protocol are **silently discarded** by the server. |
-   | Protocol | `tcp`, `tls` or `udp` |
-   | CA / truststore file | PEM file with your TAK server's CA (TLS). |
-   | Client certificate / key | PEM files (TLS with client auth). |
+   | Username / Password | Your TAK Server account. The username becomes the certificate's common name — the identity the server sees. |
+   | Enrollment port | TAK Server's certificate enrollment API, normally **8446**. |
+   | CA / truststore file | Optional. Your TAK server's CA (PEM), used to verify the enrollment server — your password is sent to it. If the enrollment port has a publicly trusted certificate (e.g. Let's Encrypt), leave empty. |
+   | Verify server certificate | Turn off only if the enrollment port is self-signed and you have no CA file. |
+
+   Home Assistant fetches the server's certificate template
+   (`/Marti/api/tls/config`), generates a private key and signing request
+   with `CN=<username>`, and sends it to `/Marti/api/tls/signClient/v2`
+   with your credentials. The server returns a signed client certificate
+   and its CA chain; the chain is used to verify the 8089 connection when
+   no CA file is given. The certificate is renewed automatically when it
+   is within 14 days of expiry (checked whenever the integration starts or
+   reloads). If the server rejects the stored password during renewal,
+   Home Assistant shows a **re-authenticate** prompt.
+
+   The certificate, private key and password are stored in Home
+   Assistant's config entry storage (`.storage/core.config_entries`),
+   like other integrations' credentials.
+
+   **Certificate files:**
+
+   | Field | Notes |
+   |---|---|
+   | Client certificate / key | PEM files. |
    | .p12 bundle | Alternative to the PEM pair — the enrollment/data-package bundle from TAK Server. Password is usually `atakatak`. |
-   | Verify server certificate | Disable only for self-signed setups you trust. |
-   | Verify server hostname | Off by default: TAK server certificates are usually issued for an internal name, so ATAK/iTAK skip hostname checks too. |
+   | CA / truststore file | PEM file with your TAK server's CA. |
 
-   Certificate paths are resolved relative to the Home Assistant
-   configuration folder (e.g. `ssl/tak_ca.pem` → `/config/ssl/tak_ca.pem`).
-   The connection (including the TLS handshake) is tested before the entry
-   is created.
+   Both methods also offer **Verify server certificate** (disable only for
+   setups you trust) and **Verify server hostname** (off by default: TAK
+   server certificates are usually issued for an internal name, so
+   ATAK/iTAK skip hostname checks too). Certificate paths are resolved
+   relative to the Home Assistant configuration folder (e.g.
+   `ssl/tak_ca.pem` → `/config/ssl/tak_ca.pem`). The connection, including
+   the TLS handshake with the client certificate, is tested before the
+   entry is saved.
 
-3. Open the integration's **Configure** menu to:
+4. Open the integration's **Configure** menu to:
    - **Add an entity to report to TAK** — pick a `person`,
      `device_tracker` or `zone` entity and choose **Contact** or **Mission
      marker**, then fill in the call sign and the mode-specific fields.
@@ -79,8 +112,10 @@ folder and restart Home Assistant.
      time (default 300 s; use at least 2–3× the interval), and whether to
      also send a report immediately when an entity's location changes.
 
-Changing the server connection later: use the entry's **Reconfigure**
-option (⋮ menu on the integration entry).
+Changing the server connection later — including switching between
+username/password and certificate files: use the entry's **Reconfigure**
+option (⋮ menu on the integration entry). When reconfiguring
+username/password, leave the password empty to keep the stored one.
 
 ## How entities are reported
 
@@ -116,6 +151,12 @@ Assistant starts or when someone leaves a zone).
   client certificate wasn't accepted (wrong CA / not in the server
   truststore) or the account's groups don't allow the connection. Check
   the TAK server's messaging log.
+- **"The TAK server rejected the username or password"** — check the
+  account in TAK Server's user management; the account must be allowed to
+  enroll for certificates.
+- **"Could not reach the TAK server's enrollment service"** — the
+  enrollment port (8446 by default) must be reachable from Home
+  Assistant; it's often not exposed when only 8089 is port-forwarded.
 - **Certificate verification failed** — point the CA file at your TAK
   server's truststore PEM. Hostname verification is off by default; only
   enable it if your server certificate really matches its hostname.

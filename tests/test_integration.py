@@ -22,8 +22,6 @@ from custom_components.ha2tak.const import (
     CONF_STALE,
     CONF_TEAM_COLOR,
     CONF_TEAM_ROLE,
-    CONF_TLS_CHECK_HOSTNAME,
-    CONF_TLS_VERIFY,
     DOMAIN,
     MODE_CONTACT,
     MODE_MARKER,
@@ -36,8 +34,6 @@ def _connection_input(fake_tak_server) -> dict:
         CONF_HOST: fake_tak_server.host,
         CONF_PORT: fake_tak_server.port,
         CONF_PROTOCOL: "tcp",
-        CONF_TLS_VERIFY: True,
-        CONF_TLS_CHECK_HOSTNAME: False,
     }
 
 
@@ -83,8 +79,6 @@ async def test_config_flow_cannot_connect(hass: HomeAssistant, socket_enabled):
             CONF_HOST: "127.0.0.1",
             CONF_PORT: 1,  # nothing listens here
             CONF_PROTOCOL: "tcp",
-            CONF_TLS_VERIFY: True,
-            CONF_TLS_CHECK_HOSTNAME: False,
         },
     )
     assert result["type"] is FlowResultType.FORM

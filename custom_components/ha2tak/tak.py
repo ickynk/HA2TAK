@@ -18,9 +18,13 @@ import ssl
 import tempfile
 from typing import Any
 
+from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    CONF_ENROLLED_CA,
+    CONF_ENROLLED_CERT,
+    CONF_ENROLLED_KEY,
     CONF_TLS_CA_FILE,
     CONF_TLS_CERT_FILE,
     CONF_TLS_CHECK_HOSTNAME,
@@ -33,7 +37,6 @@ from .const import (
     PROTOCOL_TLS,
     PROTOCOL_UDP,
 )
-from homeassistant.const import CONF_HOST, CONF_PORT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,7 +48,7 @@ class TakConfigError(Exception):
     """The TLS/certificate configuration is unusable (bad path, bad p12)."""
 
 
-def _resolve_path(config_dir: str, path: str) -> str:
+def resolve_path(config_dir: str, path: str) -> str:
     """Resolve a certificate path relative to the HA configuration folder."""
     path = path.strip()
     if not path:
@@ -94,21 +97,35 @@ def _extract_p12(p12_file: str, password: str) -> tuple[bytes, bytes | None]:
     return client_pem, ca_pem
 
 
+def relax_x509_strict(context: ssl.SSLContext) -> None:
+    """Python 3.13+ enables VERIFY_X509_STRICT by default, which rejects CA
+    certificates without an Authority Key Identifier. CAs minted by TAK
+    Server's scripts, OpenTAKServer or FreeTAKServer often lack it, and ATAK
+    accepts them; the chain itself is still verified."""
+    strict = getattr(ssl, "VERIFY_X509_STRICT", 0)
+    context.verify_flags &= ~strict
+
+
 def build_ssl_context(data: dict[str, Any], config_dir: str) -> ssl.SSLContext:
     """Build the TLS context for a TAK server connection (blocking I/O —
     run in an executor)."""
-    ca_file = _resolve_path(config_dir, data.get(CONF_TLS_CA_FILE) or "")
-    cert_file = _resolve_path(config_dir, data.get(CONF_TLS_CERT_FILE) or "")
-    key_file = _resolve_path(config_dir, data.get(CONF_TLS_KEY_FILE) or "")
-    p12_file = _resolve_path(config_dir, data.get(CONF_TLS_P12_FILE) or "")
+    ca_file = resolve_path(config_dir, data.get(CONF_TLS_CA_FILE) or "")
+    cert_file = resolve_path(config_dir, data.get(CONF_TLS_CERT_FILE) or "")
+    key_file = resolve_path(config_dir, data.get(CONF_TLS_KEY_FILE) or "")
+    p12_file = resolve_path(config_dir, data.get(CONF_TLS_P12_FILE) or "")
 
     client_pem = ca_pem = None
-    if p12_file:
+    if data.get(CONF_ENROLLED_CERT) and data.get(CONF_ENROLLED_KEY):
+        # Certificate obtained by username/password enrollment.
+        client_pem = (data[CONF_ENROLLED_CERT] + data[CONF_ENROLLED_KEY]).encode()
+        ca_pem = (data.get(CONF_ENROLLED_CA) or "").encode() or None
+    elif p12_file:
         client_pem, ca_pem = _extract_p12(
             p12_file, data.get(CONF_TLS_P12_PASSWORD) or ""
         )
 
     context = ssl.create_default_context(cafile=ca_file or None)
+    relax_x509_strict(context)
     if ca_pem and not ca_file:
         context.load_verify_locations(cadata=ca_pem.decode())
 
