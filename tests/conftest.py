@@ -3,15 +3,40 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from .tak_pki import FakeEnrollmentServer, FakeTlsTakServer, TakPki
 
 
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Allow loading the ha2tak custom integration in tests."""
     yield
+
+
+@pytest.fixture
+def tak_pki(hass):
+    """A TAK-like CA whose files live in the HA config folder."""
+    return TakPki(Path(hass.config.config_dir))
+
+
+@pytest.fixture
+async def enrollment_server(tak_pki, socket_enabled):
+    server = FakeEnrollmentServer(tak_pki, username="hauser", password="s3cret")
+    await server.start()
+    yield server
+    await server.stop()
+
+
+@pytest.fixture
+async def tls_tak_server(tak_pki, socket_enabled):
+    server = FakeTlsTakServer(tak_pki)
+    await server.start()
+    yield server
+    await server.stop()
 
 
 @pytest.fixture

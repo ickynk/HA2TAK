@@ -5,17 +5,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import ssl
+import uuid
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
 
 from homeassistant.config_entries import (
+    SOURCE_RECONFIGURE,
     ConfigEntry,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
 )
-from homeassistant.const import CONF_HOST, CONF_PORT
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
     BooleanSelector,
@@ -34,8 +37,16 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    AUTH_CERTIFICATES,
+    AUTH_ENROLLMENT,
+    CONF_AUTH_METHOD,
     CONF_CALLSIGN,
+    CONF_CLIENT_UID,
     CONF_COT_TYPE,
+    CONF_ENROLLED_CA,
+    CONF_ENROLLED_CERT,
+    CONF_ENROLLED_KEY,
+    CONF_ENROLLMENT_PORT,
     CONF_ENTITIES,
     CONF_INTERVAL,
     CONF_MODE,
@@ -52,6 +63,7 @@ from .const import (
     CONF_TLS_P12_FILE,
     CONF_TLS_P12_PASSWORD,
     CONF_TLS_VERIFY,
+    DEFAULT_ENROLLMENT_PORT,
     DEFAULT_INTERVAL,
     DEFAULT_MARKER_TYPE,
     DEFAULT_PORT,
@@ -65,27 +77,53 @@ from .const import (
     MODE_CONTACT,
     MODE_MARKER,
     MODES,
+    PROTOCOL_TLS,
     PROTOCOLS,
     TEAM_COLORS,
     TEAM_ROLES,
     TRACKABLE_DOMAINS,
 )
+from .enrollment import (
+    EnrollmentAuthError,
+    EnrollmentCertificateError,
+    EnrollmentConnectError,
+    EnrollmentError,
+    async_enroll_from_config,
+)
 from .tak import TakConfigError, TakConnection
 
 _LOGGER = logging.getLogger(__name__)
 
+_PORT_SELECTOR = NumberSelector(
+    NumberSelectorConfig(min=1, max=65535, step=1, mode=NumberSelectorMode.BOX)
+)
+_PASSWORD_SELECTOR = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
 
-def _connection_schema(defaults: dict[str, Any]) -> vol.Schema:
+# Keys that belong to one TLS authentication method only; dropped when the
+# entry switches method so stale material is never used.
+_CERT_FILE_KEYS = (
+    CONF_TLS_CERT_FILE,
+    CONF_TLS_KEY_FILE,
+    CONF_TLS_P12_FILE,
+    CONF_TLS_P12_PASSWORD,
+)
+_ENROLL_KEYS = (
+    CONF_USERNAME,
+    CONF_PASSWORD,
+    CONF_ENROLLMENT_PORT,
+    CONF_ENROLLED_CERT,
+    CONF_ENROLLED_KEY,
+    CONF_ENROLLED_CA,
+)
+
+
+def _server_schema(defaults: Mapping[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
             vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, "")): str,
             vol.Required(
                 CONF_PORT, default=defaults.get(CONF_PORT, DEFAULT_PORT)
-            ): NumberSelector(
-                NumberSelectorConfig(
-                    min=1, max=65535, step=1, mode=NumberSelectorMode.BOX
-                )
-            ),
+            ): _PORT_SELECTOR,
             vol.Required(
                 CONF_PROTOCOL, default=defaults.get(CONF_PROTOCOL, "tcp")
             ): SelectSelector(
@@ -95,9 +133,28 @@ def _connection_schema(defaults: dict[str, Any]) -> vol.Schema:
                     translation_key="protocol",
                 )
             ),
-            vol.Optional(
-                CONF_TLS_CA_FILE, default=defaults.get(CONF_TLS_CA_FILE, "")
-            ): str,
+        }
+    )
+
+
+def _tls_verify_fields(defaults: Mapping[str, Any]) -> dict:
+    return {
+        vol.Optional(
+            CONF_TLS_CA_FILE, default=defaults.get(CONF_TLS_CA_FILE, "")
+        ): str,
+        vol.Required(
+            CONF_TLS_VERIFY, default=defaults.get(CONF_TLS_VERIFY, True)
+        ): BooleanSelector(),
+        vol.Required(
+            CONF_TLS_CHECK_HOSTNAME,
+            default=defaults.get(CONF_TLS_CHECK_HOSTNAME, False),
+        ): BooleanSelector(),
+    }
+
+
+def _certificates_schema(defaults: Mapping[str, Any]) -> vol.Schema:
+    return vol.Schema(
+        {
             vol.Optional(
                 CONF_TLS_CERT_FILE, default=defaults.get(CONF_TLS_CERT_FILE, "")
             ): str,
@@ -110,30 +167,69 @@ def _connection_schema(defaults: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_TLS_P12_PASSWORD,
                 default=defaults.get(CONF_TLS_P12_PASSWORD, ""),
-            ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
-            vol.Required(
-                CONF_TLS_VERIFY, default=defaults.get(CONF_TLS_VERIFY, True)
-            ): BooleanSelector(),
-            vol.Required(
-                CONF_TLS_CHECK_HOSTNAME,
-                default=defaults.get(CONF_TLS_CHECK_HOSTNAME, False),
-            ): BooleanSelector(),
+            ): _PASSWORD_SELECTOR,
+            **_tls_verify_fields(defaults),
         }
     )
 
 
+def _enroll_schema(defaults: Mapping[str, Any], have_password: bool) -> vol.Schema:
+    # A stored password is never sent back to the browser; leaving the field
+    # empty keeps it.
+    password_key = (
+        vol.Optional(CONF_PASSWORD) if have_password else vol.Required(CONF_PASSWORD)
+    )
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_USERNAME, default=defaults.get(CONF_USERNAME, "")
+            ): str,
+            password_key: _PASSWORD_SELECTOR,
+            vol.Required(
+                CONF_ENROLLMENT_PORT,
+                default=defaults.get(CONF_ENROLLMENT_PORT, DEFAULT_ENROLLMENT_PORT),
+            ): _PORT_SELECTOR,
+            **_tls_verify_fields(defaults),
+        }
+    )
+
+
+def _enrollment_errors(exc: Exception) -> tuple[dict[str, str], dict[str, str]]:
+    """Map an enrollment failure to (errors, description_placeholders)."""
+    if isinstance(exc, EnrollmentAuthError):
+        key = "invalid_auth"
+    elif isinstance(exc, EnrollmentCertificateError):
+        key = "invalid_certificate"
+    elif isinstance(exc, EnrollmentConnectError):
+        key = "cannot_connect_enrollment"
+    elif isinstance(exc, TakConfigError):
+        key = "invalid_tls_config"
+    else:
+        key = "enrollment_failed"
+    _LOGGER.warning("TAK certificate enrollment failed: %s", exc)
+    return {"base": key}, {"error": str(exc)}
+
+
 class Ha2TakConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Set up (and reconfigure) the connection to a TAK server."""
+    """Set up (and reconfigure) the connection to a TAK server.
+
+    Steps: ``user`` (server, port, protocol) → for TLS, a ``tls_method`` menu
+    → ``tls_enroll`` (username/password) or ``tls_certificates`` (files).
+    Reconfigure walks the same steps, prefilled from the entry."""
 
     VERSION = 1
 
-    async def _async_validate(
-        self, user_input: dict[str, Any]
-    ) -> tuple[dict[str, str], dict[str, str]]:
+    def __init__(self) -> None:
+        self._data: dict[str, Any] = {}
+
+    @property
+    def _reconfiguring(self) -> bool:
+        return self.source == SOURCE_RECONFIGURE
+
+    async def _async_test_connection(self) -> tuple[dict[str, str], dict[str, str]]:
         """Try to actually connect (incl. TLS handshake). Returns
         (errors, description_placeholders)."""
-        user_input[CONF_PORT] = int(user_input[CONF_PORT])
-        connection = TakConnection(self.hass, user_input)
+        connection = TakConnection(self.hass, self._data)
         try:
             await connection.async_connect()
         except TakConfigError as exc:
@@ -142,10 +238,24 @@ class Ha2TakConfigFlow(ConfigFlow, domain=DOMAIN):
             return {"base": "invalid_certificate"}, {"error": str(exc)}
         except (OSError, asyncio.TimeoutError, ssl.SSLError) as exc:
             _LOGGER.warning("Could not connect to TAK server: %s", exc)
-            return {"base": "cannot_connect"}, {"error": str(exc)}
+            return {"base": "cannot_connect"}, {"error": str(exc) or type(exc).__name__}
         finally:
             await connection.async_close()
         return {}, {}
+
+    async def _async_finish(self) -> ConfigFlowResult:
+        """Store the validated connection settings."""
+        if self._reconfiguring:
+            return self.async_update_reload_and_abort(
+                self._get_reconfigure_entry(), data=self._data
+            )
+        await self.async_set_unique_id(
+            f"{self._data[CONF_HOST]}:{self._data[CONF_PORT]}"
+        )
+        self._abort_if_unique_id_configured()
+        return self.async_create_entry(
+            title=f"TAK server {self._data[CONF_HOST]}", data=self._data
+        )
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -153,19 +263,19 @@ class Ha2TakConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         placeholders: dict[str, str] = {}
         if user_input is not None:
-            errors, placeholders = await self._async_validate(user_input)
+            self._data.update(user_input)
+            self._data[CONF_PORT] = int(user_input[CONF_PORT])
+            self._data.setdefault(CONF_CLIENT_UID, f"HA2TAK-{uuid.uuid4().hex[:12]}")
+            if user_input[CONF_PROTOCOL] == PROTOCOL_TLS:
+                return await self.async_step_tls_method()
+            for key in (CONF_AUTH_METHOD, CONF_TLS_CA_FILE, *_CERT_FILE_KEYS, *_ENROLL_KEYS):
+                self._data.pop(key, None)
+            errors, placeholders = await self._async_test_connection()
             if not errors:
-                await self.async_set_unique_id(
-                    f"{user_input[CONF_HOST]}:{user_input[CONF_PORT]}"
-                )
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title=f"TAK server {user_input[CONF_HOST]}",
-                    data=user_input,
-                )
+                return await self._async_finish()
         return self.async_show_form(
             step_id="user",
-            data_schema=_connection_schema(user_input or {}),
+            data_schema=_server_schema(self._data),
             errors=errors,
             description_placeholders=placeholders,
         )
@@ -173,20 +283,108 @@ class Ha2TakConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        entry = self._get_reconfigure_entry()
+        self._data = dict(self._get_reconfigure_entry().data)
+        return await self.async_step_user()
+
+    async def async_step_tls_method(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_show_menu(
+            step_id="tls_method", menu_options=["tls_enroll", "tls_certificates"]
+        )
+
+    async def async_step_tls_certificates(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         placeholders: dict[str, str] = {}
         if user_input is not None:
-            errors, placeholders = await self._async_validate(user_input)
+            for key in _ENROLL_KEYS:
+                self._data.pop(key, None)
+            self._data.update(user_input)
+            self._data[CONF_AUTH_METHOD] = AUTH_CERTIFICATES
+            errors, placeholders = await self._async_test_connection()
             if not errors:
-                return self.async_update_reload_and_abort(
-                    entry, data_updates=user_input
-                )
+                return await self._async_finish()
         return self.async_show_form(
-            step_id="reconfigure",
-            data_schema=_connection_schema(user_input or dict(entry.data)),
+            step_id="tls_certificates",
+            data_schema=_certificates_schema(user_input or self._data),
             errors=errors,
             description_placeholders=placeholders,
+        )
+
+    async def async_step_tls_enroll(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        placeholders: dict[str, str] = {}
+        have_password = bool(self._data.get(CONF_PASSWORD))
+        if user_input is not None:
+            user_input = dict(user_input)
+            if not user_input.get(CONF_PASSWORD):
+                user_input.pop(CONF_PASSWORD, None)
+            user_input[CONF_ENROLLMENT_PORT] = int(user_input[CONF_ENROLLMENT_PORT])
+            for key in _CERT_FILE_KEYS:
+                self._data.pop(key, None)
+            self._data.update(user_input)
+            self._data[CONF_AUTH_METHOD] = AUTH_ENROLLMENT
+            if not self._data.get(CONF_PASSWORD):
+                errors = {"base": "invalid_auth"}
+            else:
+                try:
+                    self._data.update(
+                        await async_enroll_from_config(self.hass, self._data)
+                    )
+                except (EnrollmentError, TakConfigError) as exc:
+                    errors, placeholders = _enrollment_errors(exc)
+                else:
+                    errors, placeholders = await self._async_test_connection()
+                    if not errors:
+                        return await self._async_finish()
+        return self.async_show_form(
+            step_id="tls_enroll",
+            data_schema=_enroll_schema(
+                {**self._data, **(user_input or {})}, have_password
+            ),
+            errors=errors,
+            description_placeholders={"host": self._data[CONF_HOST], **placeholders},
+        )
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """The stored credentials no longer obtain a certificate."""
+        self._data = dict(entry_data)
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        placeholders: dict[str, str] = {}
+        if user_input is not None:
+            self._data.update(user_input)
+            try:
+                certs = await async_enroll_from_config(self.hass, self._data)
+            except (EnrollmentError, TakConfigError) as exc:
+                errors, placeholders = _enrollment_errors(exc)
+            else:
+                return self.async_update_reload_and_abort(
+                    self._get_reauth_entry(),
+                    data_updates={**user_input, **certs},
+                )
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_USERNAME, default=self._data.get(CONF_USERNAME, "")
+                    ): str,
+                    vol.Required(CONF_PASSWORD): _PASSWORD_SELECTOR,
+                }
+            ),
+            errors=errors,
+            description_placeholders={"host": self._data[CONF_HOST], **placeholders},
         )
 
     @staticmethod

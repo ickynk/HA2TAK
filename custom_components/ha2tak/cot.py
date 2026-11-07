@@ -23,7 +23,7 @@ UNKNOWN = "9999999.0"
 
 TAKV_PLATFORM = "HA2TAK"
 TAKV_DEVICE = "Home Assistant"
-TAKV_VERSION = "1.0.0"
+TAKV_VERSION = "1.1.0"
 
 
 def _cot_time(value: datetime) -> str:

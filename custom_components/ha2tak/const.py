@@ -14,6 +14,21 @@ CONF_TLS_P12_PASSWORD = "tls_p12_password"
 CONF_TLS_VERIFY = "tls_verify"
 CONF_TLS_CHECK_HOSTNAME = "tls_check_hostname"
 
+# TLS authentication method
+CONF_AUTH_METHOD = "tls_auth"
+AUTH_CERTIFICATES = "certificates"
+AUTH_ENROLLMENT = "enrollment"
+
+# Username/password certificate enrollment
+CONF_ENROLLMENT_PORT = "enrollment_port"
+CONF_CLIENT_UID = "client_uid"
+CONF_ENROLLED_CERT = "enrolled_cert"
+CONF_ENROLLED_KEY = "enrolled_key"
+CONF_ENROLLED_CA = "enrolled_ca"
+DEFAULT_ENROLLMENT_PORT = 8446
+# Re-enroll automatically when the client certificate expires within this.
+RENEW_BEFORE_DAYS = 14
+
 PROTOCOL_TCP = "tcp"
 PROTOCOL_TLS = "tls"
 PROTOCOL_UDP = "udp"
