@@ -1,4 +1,4 @@
-"""Asyncio delivery of CoT events to a TAK server over TCP, TLS or UDP.
+"""Asyncio CoT exchange with a TAK server over TCP, TLS or UDP (send only).
 
 The TCP/TLS connection is held open between reports, like a real TAK
 client: TAK Server treats streaming inputs as sessions (a contact stays
@@ -16,11 +16,14 @@ import os
 import socket
 import ssl
 import tempfile
+import time
+from collections.abc import Callable
 from typing import Any
 
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant
 
+from .cot import CotStreamParser
 from .const import (
     CONF_ENROLLED_CA,
     CONF_ENROLLED_CERT,
@@ -41,7 +44,12 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 15
-DRAIN_TIMEOUT = 1.0
+# How long to wait after the first data on a new connection for the server
+# to hang up on a rejected certificate.
+ACCEPT_CHECK_TIMEOUT = 1.0
+# A server-side disconnect this soon after connecting is reported as a
+# likely authentication problem.
+QUICK_DISCONNECT = 10.0
 
 
 class TakConfigError(Exception):
@@ -160,7 +168,12 @@ def build_ssl_context(data: dict[str, Any], config_dir: str) -> ssl.SSLContext:
 
 
 class TakConnection:
-    """A persistent CoT delivery channel to one TAK server."""
+    """A persistent, bidirectional CoT channel to one TAK server.
+
+    Outgoing events are written to the stream. A background reader consumes
+    everything the server pushes back (other clients' position reports),
+    hands each CoT event to the registered handler, and notices the server
+    hanging up."""
 
     def __init__(self, hass: HomeAssistant, data: dict[str, Any]) -> None:
         self._hass = hass
@@ -169,8 +182,13 @@ class TakConnection:
         self.port: int = int(data[CONF_PORT])
         self.protocol: str = data.get(CONF_PROTOCOL) or PROTOCOL_TCP
         self._ssl_context: ssl.SSLContext | None = None
-        self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
+        self._reader_task: asyncio.Task | None = None
+        self._closed: asyncio.Event | None = None
+        self._close_reason: str | None = None
+        self._first_send_checked = False
+        self._connected_at = 0.0
+        self._event_handler: Callable[[bytes], None] | None = None
         self._lock = asyncio.Lock()
         # The classic misconfiguration: TAK Server listens for plain TCP on
         # 8087 and TLS (client certs required) on 8089. Bytes sent with the
@@ -191,8 +209,19 @@ class TakConnection:
     def connected(self) -> bool:
         return self.protocol == PROTOCOL_UDP or self._writer is not None
 
+    @property
+    def can_receive(self) -> bool:
+        """UDP is send-only; TCP and TLS streams carry server traffic back."""
+        return self.protocol != PROTOCOL_UDP
+
+    def set_event_handler(self, handler: Callable[[bytes], None] | None) -> None:
+        """Register a callback for each CoT event received from the server.
+        Called in the event loop."""
+        self._event_handler = handler
+
     async def async_connect(self) -> None:
-        """Open the connection (TLS handshake included). No-op for UDP."""
+        """Open the connection (TLS handshake included). No-op for UDP or
+        when already connected."""
         async with self._lock:
             await self._connect()
 
@@ -206,9 +235,18 @@ class TakConnection:
                     build_ssl_context, self._data, self._hass.config.config_dir
                 )
             ssl_context = self._ssl_context
-        self._reader, self._writer = await asyncio.wait_for(
+        reader, writer = await asyncio.wait_for(
             asyncio.open_connection(self.host, self.port, ssl=ssl_context),
             CONNECT_TIMEOUT,
+        )
+        self._writer = writer
+        self._closed = asyncio.Event()
+        self._close_reason = None
+        self._first_send_checked = False
+        self._connected_at = time.monotonic()
+        self._reader_task = self._hass.async_create_background_task(
+            self._read_loop(reader, writer, self._closed),
+            f"ha2tak reader {self.host}:{self.port}",
         )
         _LOGGER.info(
             "Connected to TAK server %s:%d (%s), holding connection open",
@@ -216,6 +254,48 @@ class TakConnection:
             self.port,
             self.protocol,
         )
+
+    async def _read_loop(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        closed: asyncio.Event,
+    ) -> None:
+        parser = CotStreamParser()
+        reason = "TAK server closed the connection"
+        try:
+            while data := await reader.read(65536):
+                for event in parser.feed(data):
+                    if self._event_handler is None:
+                        continue
+                    try:
+                        self._event_handler(event)
+                    except Exception:  # noqa: BLE001 - never kill the reader
+                        _LOGGER.exception("Error handling CoT event from TAK server")
+        except (OSError, ssl.SSLError) as exc:
+            reason = f"TAK connection error: {exc}"
+
+        if time.monotonic() - self._connected_at < QUICK_DISCONNECT:
+            # After a successful TLS 1.3 handshake, a rejected client
+            # certificate surfaces only as the server hanging up.
+            reason += (
+                " right after connecting. This usually means the client "
+                "certificate was not accepted (wrong CA / not in the server "
+                "truststore) or the account's groups don't allow the "
+                "connection - check the TAK server's messaging log."
+            )
+        if self._writer is writer:
+            _LOGGER.warning("%s (%s:%d)", reason, self.host, self.port)
+            self._close_reason = reason
+            self._writer = None
+            self._reader_task = None
+            writer.close()
+        closed.set()
+
+    async def async_ensure_connected(self) -> None:
+        """Reconnect if the server dropped us, so receiving keeps working
+        even while nothing is being sent."""
+        await self.async_connect()
 
     async def async_send(self, events: list[bytes]) -> None:
         """Deliver a batch of CoT events, reconnecting once if needed."""
@@ -230,10 +310,11 @@ class TakConnection:
             for attempt in (1, 2):
                 try:
                     await self._connect()
-                    assert self._writer is not None
+                    assert self._writer is not None and self._closed is not None
                     self._writer.write(payload)
                     await self._writer.drain()
-                    await self._check_alive()
+                    if not self._first_send_checked:
+                        await self._check_accepted(self._closed)
                     _LOGGER.debug(
                         "Sent %d CoT event(s) to %s:%d",
                         len(events),
@@ -251,51 +332,38 @@ class TakConnection:
             assert last_err is not None
             raise last_err
 
+    async def _check_accepted(self, closed: asyncio.Event) -> None:
+        """Give the server a moment to hang up after our first data on a
+        new connection, so a rejected certificate is reported as a send
+        failure instead of looking like success."""
+        try:
+            await asyncio.wait_for(closed.wait(), ACCEPT_CHECK_TIMEOUT)
+        except asyncio.TimeoutError:
+            self._first_send_checked = True
+            return
+        raise OSError(self._close_reason or "TAK server closed the connection")
+
     def _send_udp(self, events: list[bytes]) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             for event in events:
                 sock.sendto(event, (self.host, self.port))
-
-    async def _check_alive(self) -> None:
-        """Read whatever the server pushed at us (other clients' SA traffic).
-
-        This keeps the receive buffer empty on a long-lived connection and,
-        crucially, detects the server hanging up on us — which after a
-        successful TLS 1.3 handshake almost always means the client
-        certificate was not accepted."""
-        assert self._reader is not None
-        try:
-            while True:
-                data = await asyncio.wait_for(
-                    self._reader.read(65536), DRAIN_TIMEOUT
-                )
-                if not data:
-                    raise OSError(
-                        "TAK server closed the connection right after our "
-                        "data. This usually means the client certificate was "
-                        "not accepted (wrong CA / not in the server "
-                        "truststore) or the account's groups don't allow the "
-                        "connection - check the TAK server's messaging log."
-                    )
-                _LOGGER.debug(
-                    "Received %d bytes from TAK server (connection accepted "
-                    "and healthy)",
-                    len(data),
-                )
-        except asyncio.TimeoutError:
-            pass  # nothing pushed to us right now — connection is alive
 
     async def async_close(self) -> None:
         async with self._lock:
             await self._close()
 
     async def _close(self) -> None:
-        if self._writer is not None:
-            writer = self._writer
-            self._reader = None
-            self._writer = None
+        task, self._reader_task = self._reader_task, None
+        writer, self._writer = self._writer, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if writer is not None:
             try:
                 writer.close()
-                await writer.wait_closed()
+                await asyncio.wait_for(writer.wait_closed(), 5)
             except (OSError, asyncio.TimeoutError):
                 pass

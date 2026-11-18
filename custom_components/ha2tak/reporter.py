@@ -31,6 +31,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_CALLSIGN,
+    CONF_CLIENT_UID,
     CONF_COT_TYPE,
     CONF_ENTITIES,
     CONF_INTERVAL,
@@ -48,7 +49,7 @@ from .const import (
     DEFAULT_TEAM_ROLE,
     MODE_CONTACT,
 )
-from .cot import build_cot
+from .cot import build_cot, build_ping
 from .tak import TakConnection
 
 _LOGGER = logging.getLogger(__name__)
@@ -174,6 +175,8 @@ class TakReporter:
                 if event is not None:
                     events.append(event)
             if not events:
+                if only_entity is None:
+                    await self._async_keepalive()
                 return
             try:
                 await self.connection.async_send(events)
@@ -190,6 +193,25 @@ class TakReporter:
                 self.last_report = dt_util.utcnow()
                 self.last_error = None
                 self.events_sent += len(events)
+            self._notify()
+
+    async def _async_keepalive(self) -> None:
+        """With nothing to report, ping the server like an idle ATAK does.
+        This reconnects after a drop, so received callsigns keep updating
+        on a receive-only setup."""
+        if not self.connection.can_receive:
+            return
+        uid = self.entry.data.get(CONF_CLIENT_UID) or f"HA2TAK-{self.entry.entry_id}"
+        try:
+            await self.connection.async_send([build_ping(uid)])
+        except (OSError, asyncio.TimeoutError) as exc:
+            self.last_error = str(exc)
+            _LOGGER.warning(
+                "TAK server %s:%d unreachable: %s",
+                self.connection.host,
+                self.connection.port,
+                exc,
+            )
             self._notify()
 
     def _build_event(self, entity_id: str, cfg: dict[str, Any]) -> bytes | None:
