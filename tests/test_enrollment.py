@@ -37,6 +37,7 @@ from custom_components.ha2tak.const import (
     DOMAIN,
     MODE_CONTACT,
 )
+from custom_components.ha2tak.cot import CotStreamParser
 from custom_components.ha2tak.enrollment import (
     parse_name_entries,
     parse_sign_response,
@@ -126,8 +127,13 @@ async def test_enroll_and_stream_over_mutual_tls(
     assert entry.options[CONF_ENTITIES]
 
     await _wait_for(lambda: tls_tak_server.received, "a CoT event over TLS")
-    root = ET.fromstring(b"".join(tls_tak_server.received).split(b"?>", 1)[1])
-    assert root.get("uid") == "HA2TAK.person.nick"
+    await _wait_for(
+        lambda: b"HA2TAK.person.nick" in b"".join(tls_tak_server.received),
+        "the person's report",
+    )
+    events = CotStreamParser().feed(b"".join(tls_tak_server.received))
+    uids = [ET.fromstring(event).get("uid") for event in events]
+    assert "HA2TAK.person.nick" in uids
     assert "hauser" in tls_tak_server.peer_cns
 
 

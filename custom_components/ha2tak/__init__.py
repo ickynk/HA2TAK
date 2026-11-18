@@ -1,4 +1,4 @@
-"""HA2TAK - report Home Assistant entity locations to a TAK server as CoT."""
+"""HA2TAK - exchange positions between Home Assistant and a TAK server."""
 
 from __future__ import annotations
 
@@ -31,13 +31,15 @@ from .enrollment import (
     cert_expiry,
 )
 from .reporter import TakReporter
+from .runtime import Ha2TakRuntime
 from .tak import TakConfigError, TakConnection
+from .tracker import CallsignTracker
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.DEVICE_TRACKER, Platform.SENSOR]
 
-Ha2TakConfigEntry = ConfigEntry[TakReporter]
+Ha2TakConfigEntry = ConfigEntry[Ha2TakRuntime]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: Ha2TakConfigEntry) -> bool:
@@ -45,6 +47,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: Ha2TakConfigEntry) -> bo
     if entry.data.get(CONF_AUTH_METHOD) == AUTH_ENROLLMENT:
         await _async_renew_if_needed(hass, entry)
     connection = TakConnection(hass, dict(entry.data))
+    tracker = CallsignTracker(hass, entry)
+    # Registered before connecting: servers send their cached positions
+    # right after a client connects.
+    connection.set_event_handler(tracker.handle_event)
     try:
         await connection.async_connect()
     except TakConfigError as exc:
@@ -55,7 +61,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: Ha2TakConfigEntry) -> bo
         ) from exc
 
     reporter = TakReporter(hass, entry, connection)
-    entry.runtime_data = reporter
+    entry.runtime_data = Ha2TakRuntime(connection, reporter, tracker)
     await reporter.async_start()
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
@@ -68,7 +74,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: Ha2TakConfigEntry) -> b
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        await entry.runtime_data.async_stop()
+        await entry.runtime_data.reporter.async_stop()
     return unload_ok
 
 
@@ -118,6 +124,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
     async def _handle_send_now(_call: ServiceCall) -> None:
         for entry in hass.config_entries.async_entries(DOMAIN):
             if entry.state is ConfigEntryState.LOADED:
-                await entry.runtime_data.async_report()
+                await entry.runtime_data.reporter.async_report()
 
     hass.services.async_register(DOMAIN, SERVICE_SEND_NOW, _handle_send_now)

@@ -119,6 +119,11 @@ DEFAULT_TEAM_ROLE = "Team Member"
 # Entity domains offered in the entity picker.
 TRACKABLE_DOMAINS = ["person", "device_tracker", "zone"]
 
+# TAK callsigns pulled from the server into Home Assistant (entry options):
+# {callsign.casefold(): {"callsign": str, "name": str}}
+CONF_TAK_CALLSIGNS = "tak_callsigns"
+CONF_NAME = "name"
+
 SERVICE_SEND_NOW = "send_now"
 
 ATTR_TRACKED_ENTITIES = "tracked_entities"

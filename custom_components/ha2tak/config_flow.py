@@ -14,6 +14,7 @@ import voluptuous as vol
 from homeassistant.config_entries import (
     SOURCE_RECONFIGURE,
     ConfigEntry,
+    ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
@@ -50,10 +51,12 @@ from .const import (
     CONF_ENTITIES,
     CONF_INTERVAL,
     CONF_MODE,
+    CONF_NAME,
     CONF_PROTOCOL,
     CONF_REMARKS,
     CONF_SEND_ON_UPDATE,
     CONF_STALE,
+    CONF_TAK_CALLSIGNS,
     CONF_TEAM_COLOR,
     CONF_TEAM_ROLE,
     CONF_TLS_CA_FILE,
@@ -78,6 +81,7 @@ from .const import (
     MODE_MARKER,
     MODES,
     PROTOCOL_TLS,
+    PROTOCOL_UDP,
     PROTOCOLS,
     TEAM_COLORS,
     TEAM_ROLES,
@@ -91,6 +95,7 @@ from .enrollment import (
     async_enroll_from_config,
 )
 from .tak import TakConfigError, TakConnection
+from .tracker import callsign_key
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -417,10 +422,99 @@ class Ha2TakOptionsFlow(OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        menu = ["add_entity", "settings"]
+        menu = ["add_entity"]
         if self._entities:
-            menu[1:1] = ["edit_entity", "remove_entity"]
+            menu += ["edit_entity", "remove_entity"]
+        menu.append("add_callsign")
+        if self._callsigns:
+            menu.append("remove_callsign")
+        menu.append("settings")
         return self.async_show_menu(step_id="init", menu_options=menu)
+
+    @property
+    def _callsigns(self) -> dict[str, dict[str, Any]]:
+        return self.config_entry.options.get(CONF_TAK_CALLSIGNS, {})
+
+    def _recently_seen(self) -> list[SelectOptionDict]:
+        """Callsigns the running connection has seen, for the picker."""
+        if self.config_entry.state is not ConfigEntryState.LOADED:
+            return []
+        tracker = self.config_entry.runtime_data.tracker
+        return [
+            SelectOptionDict(
+                value=seen.callsign, label=f"{seen.callsign} ({seen.cot_type})"
+            )
+            for seen in tracker.seen_callsigns()
+            if callsign_key(seen.callsign) not in self._callsigns
+        ]
+
+    async def async_step_add_callsign(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if self.config_entry.data.get(CONF_PROTOCOL) == PROTOCOL_UDP:
+            return self.async_abort(reason="udp_cannot_receive")
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            callsign = user_input[CONF_CALLSIGN].strip()
+            key = callsign_key(callsign)
+            if not key:
+                errors[CONF_CALLSIGN] = "callsign_required"
+            elif key in self._callsigns:
+                errors[CONF_CALLSIGN] = "callsign_already_tracked"
+            else:
+                callsigns = dict(self._callsigns)
+                callsigns[key] = {
+                    CONF_CALLSIGN: callsign,
+                    CONF_NAME: (user_input.get(CONF_NAME) or "").strip() or callsign,
+                }
+                return self._save_options(**{CONF_TAK_CALLSIGNS: callsigns})
+        seen = self._recently_seen()
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_CALLSIGN): SelectSelector(
+                    SelectSelectorConfig(
+                        options=seen,
+                        custom_value=True,
+                        mode=SelectSelectorMode.DROPDOWN,
+                        sort=False,
+                    )
+                ),
+                vol.Optional(CONF_NAME): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="add_callsign",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"seen_count": str(len(seen))},
+        )
+
+    async def async_step_remove_callsign(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            callsigns = {
+                key: cfg
+                for key, cfg in self._callsigns.items()
+                if key not in user_input["callsigns"]
+            }
+            return self._save_options(**{CONF_TAK_CALLSIGNS: callsigns})
+        options = [
+            SelectOptionDict(
+                value=key, label=f"{cfg[CONF_NAME]} ({cfg[CONF_CALLSIGN]})"
+            )
+            for key, cfg in self._callsigns.items()
+        ]
+        schema = vol.Schema(
+            {
+                vol.Required("callsigns", default=[]): SelectSelector(
+                    SelectSelectorConfig(
+                        options=options, mode=SelectSelectorMode.LIST, multiple=True
+                    )
+                )
+            }
+        )
+        return self.async_show_form(step_id="remove_callsign", data_schema=schema)
 
     async def async_step_settings(
         self, user_input: dict[str, Any] | None = None

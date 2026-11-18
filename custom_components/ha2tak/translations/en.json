@@ -90,7 +90,9 @@
           "add_entity": "Add an entity to report to TAK",
           "edit_entity": "Edit a reported entity",
           "remove_entity": "Remove reported entities",
-          "settings": "Reporting settings"
+          "settings": "Reporting settings",
+          "add_callsign": "Pull a TAK callsign into Home Assistant",
+          "remove_callsign": "Stop pulling TAK callsigns"
         }
       },
       "settings": {
@@ -156,10 +158,32 @@
         "data": {
           "entity_ids": "Entities to remove"
         }
+      },
+      "add_callsign": {
+        "title": "Pull a TAK callsign into Home Assistant",
+        "description": "Positions the TAK server shares with this connection are matched by callsign (case-insensitive), and the callsign becomes a GPS device tracker you can use in zones, automations or attach to a Person. Pick one of the {seen_count} callsigns recently seen on the server, or type one. The server only shares positions of users in the same TAK groups as this connection.",
+        "data": {
+          "callsign": "Callsign",
+          "name": "Name in Home Assistant"
+        },
+        "data_description": {
+          "name": "Optional; defaults to the callsign."
+        }
+      },
+      "remove_callsign": {
+        "title": "Stop pulling TAK callsigns",
+        "data": {
+          "callsigns": "Callsigns to remove"
+        }
       }
     },
     "error": {
-      "already_tracked": "That entity is already being reported. Use 'Edit a reported entity' to change it."
+      "already_tracked": "That entity is already being reported. Use 'Edit a reported entity' to change it.",
+      "callsign_required": "Enter a callsign.",
+      "callsign_already_tracked": "That callsign is already being pulled into Home Assistant."
+    },
+    "abort": {
+      "udp_cannot_receive": "This connection uses UDP, which can only send. Reconfigure the TAK server connection to use TCP or TLS to receive positions from the server."
     }
   },
   "selector": {

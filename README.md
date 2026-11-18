@@ -6,6 +6,11 @@ Home Assistant entities — **people, device trackers and zones** — to a
 **Cursor-on-Target (CoT) 2.0** events. Your family, vehicles, pets or any
 GPS-tracked entity shows up live in **ATAK, WinTAK and iTAK**.
 
+It also works the other way around: pick **TAK callsigns** — teammates
+running ATAK/iTAK/WinTAK, vehicles with TAK trackers — and their positions
+become **GPS device trackers in Home Assistant**, usable in zones,
+automations, maps and People.
+
 The CoT generation and TAK delivery are derived from the
 [XPloraTAK](https://github.com/ickynk/XPloraTAK) add-on, reworked as a
 native integration with full UI configuration.
@@ -39,6 +44,10 @@ native integration with full UI configuration.
   the CoT when the entity provides them.
 - A **Last report** sensor per server (with events-sent and last-error
   attributes) and a `ha2tak.send_now` service for automations.
+- **Pull TAK callsigns into Home Assistant** as `device_tracker` entities,
+  live over the same connection, with battery, team, role, speed, course,
+  altitude and stale time. Pick callsigns from those recently seen on the
+  server or type one.
 - Multiple TAK servers: add the integration once per server.
 
 ## Installation
@@ -108,6 +117,8 @@ folder and restart Home Assistant.
      `device_tracker` or `zone` entity and choose **Contact** or **Mission
      marker**, then fill in the call sign and the mode-specific fields.
    - **Edit / Remove reported entities.**
+   - **Pull a TAK callsign into Home Assistant / Stop pulling TAK
+     callsigns** — see [below](#pulling-tak-callsigns-into-home-assistant).
    - **Reporting settings** — reporting interval (default 60 s), stale
      time (default 300 s; use at least 2–3× the interval), and whether to
      also send a report immediately when an entity's location changes.
@@ -133,6 +144,43 @@ username/password, leave the password empty to keep the stored one.
 - Reports are re-sent every interval even if the position hasn't changed,
   so markers never go stale on the TAK side while Home Assistant is up.
 
+## Pulling TAK callsigns into Home Assistant
+
+The TCP/TLS connection is two-way: the TAK server streams the positions of
+other users to it, just as it does to ATAK. Choose **Configure → Pull a TAK
+callsign into Home Assistant**, then pick a callsign from those recently
+seen on the server or type one, and optionally give it a name. A
+`device_tracker` entity is created (e.g. `device_tracker.alpha_one`) and
+updates every time that callsign reports.
+
+- Callsigns are matched case-insensitively against the `<contact
+  callsign>` of incoming CoT events, so any TAK client or marker with a
+  callsign works.
+- The state is `home`, `not_home` or a zone name, like any GPS tracker;
+  `gps_accuracy` comes from the report's circular error, `battery_level`
+  from its status.
+- Attributes: `callsign`, `uid`, `cot_type`, `team`, `role`, `altitude`
+  (m), `speed` (m/s), `course` (°), `remarks`, `last_seen`, `stale_at` and
+  `stale` (true once the sender's stale time has passed without a new
+  report).
+- The last known position survives Home Assistant restarts and is replaced
+  as soon as the callsign reports again. TAK Server also replays its latest
+  known positions to a client when it connects.
+- With nothing of its own to report, the integration sends the same
+  keepalive ping ATAK uses each reporting interval, so a receive-only
+  setup stays connected and reconnects after a drop.
+
+Requirements and limits:
+
+- **TCP or TLS only.** UDP connections can only send.
+- The server only shares positions of users **in the same TAK groups** as
+  this connection (for username/password sign-in, that's the account's
+  groups; for certificates, the groups mapped to the certificate). If a
+  callsign never shows up in the picker, check group membership first.
+- The "Last report" sensor's `positions_received` attribute counts
+  incoming positions — a quick way to see whether the server is sending
+  anything at all.
+
 ## Service
 
 ```yaml
@@ -145,6 +193,10 @@ Assistant starts or when someone leaves a zone).
 
 ## Troubleshooting
 
+- **A pulled callsign never updates** — make sure the connection is TCP
+  or TLS (not UDP) and that this connection shares a TAK group with that
+  user. `positions_received` on the "Last report" sensor shows whether any
+  positions arrive at all.
 - **Nothing appears in ATAK, no errors** — protocol/port mismatch. TCP →
   8087, TLS → 8089; the server silently drops mismatched traffic.
 - **"TAK server closed the connection right after our data"** — the
