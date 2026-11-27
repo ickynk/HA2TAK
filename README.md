@@ -120,8 +120,11 @@ folder and restart Home Assistant.
    - **Pull a TAK callsign into Home Assistant / Stop pulling TAK
      callsigns** — see [below](#pulling-tak-callsigns-into-home-assistant).
    - **Reporting settings** — reporting interval (default 60 s), stale
-     time (default 300 s; use at least 2–3× the interval), and whether to
-     also send a report immediately when an entity's location changes.
+     time (default 300 s; use at least 2–3× the interval), whether to
+     also send a report immediately when an entity's location changes, and
+     the two limits for pulled callsigns (maximum fix age, default 120 s;
+     maximum accuracy radius, default 200 m — see
+     [Which positions move a tracker](#which-positions-move-a-tracker)).
 
 Changing the server connection later — including switching between
 username/password and certificate files: use the entry's **Reconfigure**
@@ -150,22 +153,59 @@ The TCP/TLS connection is two-way: the TAK server streams the positions of
 other users to it, just as it does to ATAK. Choose **Configure → Pull a TAK
 callsign into Home Assistant**, then pick a callsign from those recently
 seen on the server or type one, and optionally give it a name. A
-`device_tracker` entity is created (e.g. `device_tracker.alpha_one`) and
-updates every time that callsign reports.
+`device_tracker` entity is created (e.g. `device_tracker.alpha_one`),
+plus a `binary_sensor` (e.g. `binary_sensor.alpha_one_gps_fresh`) that is
+on while its position is live.
 
 - Callsigns are matched case-insensitively against the `<contact
   callsign>` of incoming CoT events, so any TAK client or marker with a
   callsign works.
 - The state is `home`, `not_home` or a zone name, like any GPS tracker;
-  `gps_accuracy` comes from the report's circular error, `battery_level`
-  from its status.
+  `gps_accuracy` comes from the report's circular error (`ce`),
+  `battery_level` from its status.
 - Attributes: `callsign`, `uid`, `cot_type`, `team`, `role`, `altitude`
-  (m), `speed` (m/s), `course` (°), `remarks`, `last_seen`, `stale_at` and
+  (m), `speed` (m/s), `course` (°), `remarks`, `last_seen` (when the
+  report was sent), `fix_time` (when its position was measured),
+  `fix_age_s`, `reported_ce` (the `ce` as sent), `position_stale`,
+  `position_time` (when the position shown was measured), `stale_at` and
   `stale` (true once the sender's stale time has passed without a new
   report).
 - The last known position survives Home Assistant restarts and is replaced
-  as soon as the callsign reports again. TAK Server also replays its latest
-  known positions to a client when it connects.
+  by the next accepted fix. TAK Server also replays its latest known
+  positions to a client when it connects; replays of a fix that is not
+  newer don't move the tracker.
+
+### Which positions move a tracker
+
+Home Assistant counts a zone as entered when *distance − gps_accuracy <
+zone radius*, so a report with a huge accuracy radius "enters" zones
+kilometres away even if the device never moved. Some senders do exactly
+that while they have no GPS fix: **WearTAK** keeps repeating its last fix,
+marking it with `<weartak_location timeMillis="…">` (the real fix time)
+and growing `ce` by 5 m per second of fix age — about 57 km after three
+hours.
+
+A received report therefore only moves the tracker (latitude, longitude
+and `gps_accuracy`) when **all** of these hold:
+
+1. It carries a **new fix**: its fix time (`weartak_location@timeMillis`
+   when present, otherwise the event time) is newer than any fix seen
+   before. Reports with an *older* fix — replays or out-of-order
+   delivery — are dropped entirely.
+2. The fix was measured at most **maximum fix age** (default 120 s) before
+   the report was sent.
+3. Its accuracy radius is at most **maximum accuracy** (default 200 m).
+   For WearTAK's repeated fixes the 5 m/s growth is subtracted first, so
+   the real accuracy of the original fix is used.
+
+Any other report keeps the last good position and accuracy unchanged — so
+zone triggers can't re-fire — and only updates battery and attributes,
+with `position_stale: true` and the "GPS fresh" binary sensor off.
+`gps_accuracy` never exceeds the maximum accuracy; a report without an
+accuracy (`ce` 9999999) keeps the previous accuracy, or uses the maximum
+for the first fix, rather than claiming perfect accuracy. Until the first
+accepted fix (with nothing to restore), the tracker's position is
+unknown. Both limits are under **Configure → Reporting settings**.
 - With nothing of its own to report, the integration sends the same
   keepalive ping ATAK uses each reporting interval, so a receive-only
   setup stays connected and reconnects after a drop.
@@ -193,6 +233,10 @@ Assistant starts or when someone leaves a zone).
 
 ## Troubleshooting
 
+- **A pulled callsign's position doesn't move but its battery updates**
+  — its reports aren't new fixes within the limits; check `fix_age_s` and
+  `reported_ce` against the limits in **Reporting settings**. With
+  WearTAK, the watch has no GPS fix (e.g. off-wrist indoors).
 - **A pulled callsign never updates** — make sure the connection is TCP
   or TLS (not UDP) and that this connection shares a TAK group with that
   user. `positions_received` on the "Last report" sensor shows whether any

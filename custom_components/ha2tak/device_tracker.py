@@ -8,7 +8,6 @@ from typing import Any
 from homeassistant.components.device_tracker import SourceType, TrackerEntity
 from homeassistant.const import ATTR_BATTERY_LEVEL, ATTR_GPS_ACCURACY
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_point_in_utc_time
@@ -17,9 +16,12 @@ from homeassistant.util import dt as dt_util
 
 from . import Ha2TakConfigEntry
 from .const import CONF_NAME
-from .cot import CotReport
 from .runtime import server_device_info
-from .tracker import CallsignTracker, signal_callsign_update
+from .tracker import (
+    CallsignTracker,
+    async_remove_unwanted_callsign_entities,
+    signal_callsign_update,
+)
 
 ATTR_CALLSIGN = "callsign"
 ATTR_UID = "uid"
@@ -33,8 +35,28 @@ ATTR_REMARKS = "remarks"
 ATTR_LAST_SEEN = "last_seen"
 ATTR_STALE_AT = "stale_at"
 ATTR_STALE = "stale"
+ATTR_FIX_TIME = "fix_time"
+ATTR_FIX_AGE = "fix_age_s"
+ATTR_REPORTED_CE = "reported_ce"
+ATTR_POSITION_STALE = "position_stale"
+ATTR_POSITION_TIME = "position_time"
 
-UNIQUE_ID_MARKER = "_callsign_"
+_RESTORED_ATTRS = (
+    ATTR_UID,
+    ATTR_COT_TYPE,
+    ATTR_TEAM,
+    ATTR_ROLE,
+    ATTR_ALTITUDE,
+    ATTR_SPEED,
+    ATTR_COURSE,
+    ATTR_REMARKS,
+    ATTR_LAST_SEEN,
+    ATTR_FIX_TIME,
+    ATTR_FIX_AGE,
+    ATTR_REPORTED_CE,
+    ATTR_POSITION_STALE,
+    ATTR_POSITION_TIME,
+)
 
 
 async def async_setup_entry(
@@ -47,23 +69,21 @@ async def async_setup_entry(
         TakCallsignTracker(entry, tracker, key, cfg)
         for key, cfg in tracker.watched.items()
     ]
-
-    # Callsigns removed in the options flow leave registry entries behind.
-    wanted = {entity.unique_id for entity in entities}
-    registry = er.async_get(hass)
-    for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
-        if (
-            reg_entry.domain == "device_tracker"
-            and UNIQUE_ID_MARKER in reg_entry.unique_id
-            and reg_entry.unique_id not in wanted
-        ):
-            registry.async_remove(reg_entry.entity_id)
-
+    async_remove_unwanted_callsign_entities(
+        hass, entry, "device_tracker", {e.unique_id for e in entities}
+    )
     async_add_entities(entities)
 
 
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
 class TakCallsignTracker(TrackerEntity, RestoreEntity):
-    """The position of one TAK callsign, as reported via the TAK server."""
+    """The position of one TAK callsign, as reported via the TAK server.
+
+    Position and accuracy only change when the CallsignTracker accepts a
+    new, fresh and accurate fix; other reports update the attributes."""
 
     _attr_should_poll = False
     _attr_source_type = SourceType.GPS
@@ -81,7 +101,7 @@ class TakCallsignTracker(TrackerEntity, RestoreEntity):
     ) -> None:
         self._tracker = tracker
         self._key = key
-        self._attr_unique_id = f"{entry.entry_id}{UNIQUE_ID_MARKER}{key}"
+        self._attr_unique_id = f"{entry.entry_id}_callsign_{key}"
         self._attr_name = cfg.get(CONF_NAME) or cfg["callsign"]
         self._attr_device_info = server_device_info(entry)
         self._battery: int | None = None
@@ -112,33 +132,30 @@ class TakCallsignTracker(TrackerEntity, RestoreEntity):
         )
         self.async_on_remove(self._cancel_stale_timer)
 
-        if (report := self._tracker.latest.get(self._key)) is not None:
-            self._apply(report)
-        elif (last := await self.async_get_last_state()) is not None:
-            self._restore(last.attributes)
+        if self._key not in self._tracker.states:
+            if (last := await self.async_get_last_state()) is not None:
+                self._restore(last.attributes)
+        self._render()
 
     @callback
     def _restore(self, attrs: dict[str, Any]) -> None:
         """Keep showing the last known position across restarts until the
-        callsign reports again."""
+        callsign reports a newer fix."""
         lat, lon = attrs.get("latitude"), attrs.get("longitude")
         if lat is None or lon is None:
             return
-        self._attr_latitude = float(lat)
-        self._attr_longitude = float(lon)
-        self._attr_location_accuracy = float(attrs.get(ATTR_GPS_ACCURACY) or 0)
+        accuracy = attrs.get(ATTR_GPS_ACCURACY)
+        position_time = dt_util.parse_datetime(str(attrs.get(ATTR_POSITION_TIME) or ""))
+        self._tracker.seed(
+            self._key,
+            float(lat),
+            float(lon),
+            float(accuracy) if accuracy is not None else None,
+            position_time,
+            dt_util.parse_datetime(str(attrs.get(ATTR_FIX_TIME) or "")),
+        )
         self._battery = attrs.get(ATTR_BATTERY_LEVEL)
-        for key in (
-            ATTR_UID,
-            ATTR_COT_TYPE,
-            ATTR_TEAM,
-            ATTR_ROLE,
-            ATTR_ALTITUDE,
-            ATTR_SPEED,
-            ATTR_COURSE,
-            ATTR_REMARKS,
-            ATTR_LAST_SEEN,
-        ):
+        for key in _RESTORED_ATTRS:
             if attrs.get(key) is not None:
                 self._extra[key] = attrs[key]
         if stale_at := dt_util.parse_datetime(str(attrs.get(ATTR_STALE_AT) or "")):
@@ -147,24 +164,43 @@ class TakCallsignTracker(TrackerEntity, RestoreEntity):
 
     @callback
     def _async_handle_update(self) -> None:
-        if (report := self._tracker.latest.get(self._key)) is not None:
-            self._apply(report)
-            self.async_write_ha_state()
+        self._render()
+        self.async_write_ha_state()
 
     @callback
-    def _apply(self, report: CotReport) -> None:
-        self._attr_latitude = report.lat
-        self._attr_longitude = report.lon
-        self._attr_location_accuracy = report.ce or 0
+    def _render(self) -> None:
+        state = self._tracker.states.get(self._key)
+        if state is None:
+            return
+        if state.latitude is not None and state.longitude is not None:
+            self._attr_latitude = state.latitude
+            self._attr_longitude = state.longitude
+            accuracy = state.accuracy
+            if accuracy is None:
+                accuracy = self._tracker.max_accuracy
+            # Never report a wider circle than the configured limit.
+            self._attr_location_accuracy = min(accuracy, self._tracker.max_accuracy)
+            self._extra[ATTR_POSITION_TIME] = _iso(state.fix_time)
+
+        report = state.report
+        if report is None:
+            return  # restored only
         if report.battery is not None:
             self._battery = report.battery
+        position_time = self._extra.get(ATTR_POSITION_TIME)
         self._extra = {
             ATTR_CALLSIGN: report.callsign,
             ATTR_UID: report.uid,
             ATTR_COT_TYPE: report.cot_type,
-            ATTR_LAST_SEEN: (report.time or dt_util.utcnow()).isoformat(),
+            ATTR_LAST_SEEN: _iso(report.time or dt_util.utcnow()),
+            ATTR_FIX_TIME: _iso(report.fix_time),
+            ATTR_FIX_AGE: round(report.fix_age_s, 1),
+            ATTR_POSITION_STALE: bool(state.position_stale),
         }
+        if position_time is not None:
+            self._extra[ATTR_POSITION_TIME] = position_time
         for key, value in (
+            (ATTR_REPORTED_CE, report.reported_ce),
             (ATTR_TEAM, report.team),
             (ATTR_ROLE, report.role),
             (ATTR_ALTITUDE, report.hae),

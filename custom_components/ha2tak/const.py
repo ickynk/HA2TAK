@@ -124,6 +124,12 @@ TRACKABLE_DOMAINS = ["person", "device_tracker", "zone"]
 CONF_TAK_CALLSIGNS = "tak_callsigns"
 CONF_NAME = "name"
 
+# Limits for accepting a received position as a new fix (entry options).
+CONF_MAX_FIX_AGE = "max_fix_age"
+CONF_MAX_ACCURACY = "max_accuracy"
+DEFAULT_MAX_FIX_AGE = 120
+DEFAULT_MAX_ACCURACY = 200
+
 SERVICE_SEND_NOW = "send_now"
 
 ATTR_TRACKED_ENTITIES = "tracked_entities"
