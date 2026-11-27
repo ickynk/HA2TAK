@@ -100,11 +100,15 @@
         "data": {
           "report_interval": "Reporting interval",
           "stale_seconds": "Stale time",
-          "send_on_update": "Also report immediately when an entity's location updates"
+          "send_on_update": "Also report immediately when an entity's location updates",
+          "max_fix_age": "Pulled callsigns: maximum fix age",
+          "max_accuracy": "Pulled callsigns: maximum accuracy radius"
         },
         "data_description": {
           "report_interval": "How often position reports are sent to the TAK server.",
-          "stale_seconds": "How long TAK clients keep a report before marking it stale. Use at least 2–3× the reporting interval."
+          "stale_seconds": "How long TAK clients keep a report before marking it stale. Use at least 2–3× the reporting interval.",
+          "max_fix_age": "A received position only moves the tracker if it is a new fix measured at most this long before it was sent. Older fixes (e.g. a watch without GPS repeating its last one) keep the last good position.",
+          "max_accuracy": "A received position only moves the tracker if its accuracy radius is at most this. The tracker's gps_accuracy never exceeds it, so an inaccurate report can't make Home Assistant think a far-away zone was entered."
         }
       },
       "add_entity": {

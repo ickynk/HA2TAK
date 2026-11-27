@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
+import pytest
 from pytest_homeassistant_custom_component.common import mock_restore_cache
 
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant, State
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.components import zone
 from homeassistant.helpers import entity_registry as er
+from homeassistant.setup import async_setup_component
 
 from custom_components.ha2tak.const import (
     CONF_CALLSIGN,
@@ -275,3 +279,257 @@ async def test_receive_only_reconnects_after_drop(hass: HomeAssistant, fake_tak_
         lambda: hass.states.get(entity_id).attributes.get("latitude") == 5.0,
         "position after reconnect",
     )
+
+
+# --- WearTAK repeated fixes (field report 2026-11-27) -----------------------
+
+GRANDMA_OFFSET_DEG = 0.5126  # ~57 km north of home
+
+
+def _cot_ts(value: datetime) -> str:
+    return value.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _weartak(
+    callsign: str,
+    lat: float,
+    lon: float,
+    ce: float,
+    sent: datetime,
+    fix: datetime | None = None,
+) -> bytes:
+    """A PLI shaped like WearTAK's. With ``fix`` it is a repeated old fix:
+    <weartak_location timeMillis> holds the fix time, the event time is the
+    send time, and ce has grown by 5 m/s of fix age."""
+    marker = (
+        f'<weartak_location timeMillis="{int(fix.timestamp() * 1000)}"/>' if fix else ""
+    )
+    return (
+        f'<event version="2.0" uid="WEARTAK-{callsign}" type="a-f-G-U-C" how="m-g" '
+        f'time="{_cot_ts(sent)}" start="{_cot_ts(sent)}" '
+        f'stale="{_cot_ts(sent + timedelta(minutes=10))}">'
+        f'<point lat="{lat}" lon="{lon}" hae="9999999.0" ce="{ce}" le="9999999.0"/>'
+        f'<detail><contact callsign="{callsign}" endpoint="*:-1:stcp"/>'
+        '<precisionlocation altsrc="GPS" geopointsrc="GPS"/>'
+        f'{marker}<status battery="80"/></detail></event>'
+    ).encode()
+
+
+def test_parse_weartak_repeated_fix():
+    fix = datetime(2026, 11, 27, 6, 8, 0, tzinfo=timezone.utc)
+    report = parse_cot(
+        _weartak("W", 1.0, 2.0, 143.0, fix + timedelta(seconds=23), fix=fix)
+    )
+    assert report.fix_time == fix
+    assert report.fix_age_s == pytest.approx(23.0)
+    assert report.reported_ce == 143.0
+    assert report.ce == pytest.approx(28.0)  # 143 - 5 * 23
+
+    fresh = parse_cot(_weartak("W", 1.0, 2.0, 44.0, fix))
+    assert (fresh.fix_time, fresh.fix_age_s, fresh.ce) == (fix, 0.0, 44.0)
+
+    # Never below 1 m, whatever the arithmetic says.
+    worn = parse_cot(_weartak("W", 1.0, 2.0, 50.0, fix + timedelta(hours=1), fix=fix))
+    assert worn.ce == 1.0
+
+
+async def _watch_setup(hass, fake_tak_server, *callsigns: str):
+    assert await async_setup_component(
+        hass,
+        "zone",
+        {
+            "zone": [
+                {
+                    "name": "Grandma",
+                    "latitude": hass.config.latitude + GRANDMA_OFFSET_DEG,
+                    "longitude": hass.config.longitude,
+                    "radius": 200,
+                }
+            ]
+        },
+    )
+    entry = await _setup_entry(hass, fake_tak_server)
+    for callsign in callsigns:
+        await _add_callsign(hass, entry, callsign)
+    return entry
+
+
+async def _push_and_settle(hass, fake_tak_server, entry, event: bytes) -> None:
+    before = entry.runtime_data.tracker.events_received
+    await fake_tak_server.push(event)
+    await _wait_for(
+        lambda: entry.runtime_data.tracker.events_received > before, "event"
+    )
+    await hass.async_block_till_done()
+
+
+async def test_weartak_repeated_fix_does_not_enter_far_zones(
+    hass: HomeAssistant, fake_tak_server
+):
+    entry = await _watch_setup(hass, fake_tak_server, "WATCH")
+    entity_id = "device_tracker.watch"
+    fresh_id = "binary_sensor.watch_gps_fresh"
+    home_lat, home_lon = hass.config.latitude, hass.config.longitude
+    t0 = datetime.now(timezone.utc).replace(microsecond=0)
+
+    # 06:08 fresh fix at home.
+    await _push_and_settle(
+        hass, fake_tak_server, entry, _weartak("WATCH", home_lat, home_lon, 44.0, t0)
+    )
+    state = hass.states.get(entity_id)
+    assert state.state == "home"
+    assert state.attributes["gps_accuracy"] == 44.0
+    assert state.attributes["position_stale"] is False
+    assert hass.states.get(fresh_id).state == "on"
+
+    # 23 s later: the same fix repeated, ce inflated to 143 m.
+    await _push_and_settle(
+        hass,
+        fake_tak_server,
+        entry,
+        _weartak("WATCH", home_lat, home_lon, 143.0, t0 + timedelta(seconds=23), fix=t0),
+    )
+    state = hass.states.get(entity_id)
+    assert state.state == "home"
+    assert state.attributes["gps_accuracy"] == 44.0
+    assert state.attributes["latitude"] == home_lat
+    assert state.attributes["position_stale"] is True
+    assert state.attributes["fix_age_s"] == pytest.approx(23.0)
+    assert state.attributes["reported_ce"] == 143.0
+    assert state.attributes["fix_time"] == t0.isoformat()
+    assert hass.states.get(fresh_id).state == "off"
+
+    # Hours later the repeated fix claims ~57 km accuracy.
+    await _push_and_settle(
+        hass,
+        fake_tak_server,
+        entry,
+        _weartak("WATCH", home_lat, home_lon, 56700.0, t0 + timedelta(hours=3), fix=t0),
+    )
+    state = hass.states.get(entity_id)
+    grandma = hass.states.get("zone.grandma")
+    assert state.state == "home"
+    assert state.attributes["gps_accuracy"] == 44.0
+    assert state.attributes["battery_level"] == 80
+    # What zone triggers evaluate: with the old behaviour (gps_accuracy =
+    # reported ce) Grandma's would count as entered; now it doesn't.
+    assert zone.in_zone(grandma, home_lat, home_lon, 56700.0)
+    assert not zone.in_zone(
+        grandma, home_lat, home_lon, state.attributes["gps_accuracy"]
+    )
+
+
+async def test_new_fixes_must_pass_limits(hass: HomeAssistant, fake_tak_server):
+    entry = await _watch_setup(hass, fake_tak_server, "WATCH")
+    entity_id = "device_tracker.watch"
+    lat, lon = hass.config.latitude, hass.config.longitude
+    t0 = datetime.now(timezone.utc).replace(microsecond=0)
+    await _push_and_settle(
+        hass, fake_tak_server, entry, _weartak("WATCH", lat, lon, 30.0, t0)
+    )
+
+    # A new fix, but too vague (500 m > 200 m default).
+    await _push_and_settle(
+        hass,
+        fake_tak_server,
+        entry,
+        _weartak("WATCH", lat + 0.01, lon, 500.0, t0 + timedelta(seconds=60)),
+    )
+    state = hass.states.get(entity_id)
+    assert (state.attributes["latitude"], state.attributes["gps_accuracy"]) == (lat, 30.0)
+    assert state.attributes["position_stale"] is True
+
+    # A new fix, accurate after correction, but measured 200 s before
+    # sending (> 120 s default).
+    fix = t0 + timedelta(seconds=100)
+    await _push_and_settle(
+        hass,
+        fake_tak_server,
+        entry,
+        _weartak("WATCH", lat + 0.02, lon, 1010.0, fix + timedelta(seconds=200), fix=fix),
+    )
+    assert hass.states.get(entity_id).attributes["latitude"] == lat
+
+    # A good new fix moves it.
+    await _push_and_settle(
+        hass,
+        fake_tak_server,
+        entry,
+        _weartak("WATCH", lat + 0.03, lon, 20.0, t0 + timedelta(seconds=400)),
+    )
+    state = hass.states.get(entity_id)
+    assert state.attributes["latitude"] == lat + 0.03
+    assert state.attributes["gps_accuracy"] == 20.0
+    assert state.attributes["position_stale"] is False
+
+    # Raising the limit lets the same kind of report through.
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "settings"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            "report_interval": 60,
+            "stale_seconds": 300,
+            "send_on_update": False,
+            "max_fix_age": 120,
+            "max_accuracy": 1000,
+        },
+    )
+    await hass.async_block_till_done()
+    assert entry.options["max_accuracy"] == 1000
+    await _push_and_settle(
+        hass,
+        fake_tak_server,
+        entry,
+        _weartak("WATCH", lat + 0.04, lon, 500.0, t0 + timedelta(seconds=500)),
+    )
+    assert hass.states.get(entity_id).attributes["gps_accuracy"] == 500.0
+
+
+async def test_replayed_older_report_is_ignored(hass: HomeAssistant, fake_tak_server):
+    entry = await _watch_setup(hass, fake_tak_server, "WATCH")
+    entity_id = "device_tracker.watch"
+    lat, lon = hass.config.latitude, hass.config.longitude
+    t0 = datetime.now(timezone.utc).replace(microsecond=0)
+    await _push_and_settle(
+        hass, fake_tak_server, entry, _weartak("WATCH", lat, lon, 30.0, t0)
+    )
+    # Replay of an earlier position somewhere else (e.g. server SA cache).
+    await _push_and_settle(
+        hass,
+        fake_tak_server,
+        entry,
+        _weartak("WATCH", lat + 0.5, lon, 10.0, t0 - timedelta(minutes=5)),
+    )
+    state = hass.states.get(entity_id)
+    assert state.attributes["latitude"] == lat
+    assert state.attributes["position_stale"] is False
+    assert state.attributes["fix_time"] == t0.isoformat()
+
+
+async def test_unknown_accuracy_is_not_perfect(hass: HomeAssistant, fake_tak_server):
+    entry = await _watch_setup(hass, fake_tak_server, "WATCH", "NOCE")
+    lat, lon = hass.config.latitude, hass.config.longitude
+    t0 = datetime.now(timezone.utc).replace(microsecond=0)
+
+    # No earlier accuracy: use the configured maximum, not 0.
+    await _push_and_settle(
+        hass, fake_tak_server, entry, _weartak("NOCE", lat, lon, 9999999.0, t0)
+    )
+    assert hass.states.get("device_tracker.noce").attributes["gps_accuracy"] == 200
+
+    # With an earlier accuracy: keep it.
+    await _push_and_settle(
+        hass, fake_tak_server, entry, _weartak("WATCH", lat, lon, 35.0, t0)
+    )
+    await _push_and_settle(
+        hass,
+        fake_tak_server,
+        entry,
+        _weartak("WATCH", lat + 0.001, lon, 9999999.0, t0 + timedelta(seconds=30)),
+    )
+    state = hass.states.get("device_tracker.watch")
+    assert state.attributes["latitude"] == lat + 0.001
+    assert state.attributes["gps_accuracy"] == 35.0

@@ -26,7 +26,7 @@ UNKNOWN = "9999999.0"
 
 TAKV_PLATFORM = "HA2TAK"
 TAKV_DEVICE = "Home Assistant"
-TAKV_VERSION = "1.2.0"
+TAKV_VERSION = "1.2.1"
 
 
 def _cot_time(value: datetime) -> str:
@@ -156,6 +156,13 @@ class CotReport:
     ce: Optional[float] = None
     time: Optional[datetime] = None
     stale: Optional[datetime] = None
+    # When the position was actually measured. Usually the event time, but
+    # some senders repeat an old fix with a fresh event time (see below).
+    fix_time: Optional[datetime] = None
+    # Seconds between the fix and the send time (0 for a fresh fix).
+    fix_age_s: float = 0.0
+    # The ce exactly as sent, before any correction.
+    reported_ce: Optional[float] = None
     battery: Optional[int] = None
     course: Optional[float] = None
     speed: Optional[float] = None
@@ -185,6 +192,27 @@ def _parse_time(value: Optional[str]) -> Optional[datetime]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+# WearTAK keeps sending its last fix while it has none, marking it with
+# <weartak_location timeMillis="<fix time>"/> and inflating ce by this many
+# metres per second of fix age.
+WEARTAK_CE_GROWTH = 5.0
+
+
+def _weartak_fix_time(detail: Optional[ET.Element]) -> Optional[datetime]:
+    if detail is None:
+        return None
+    elem = detail.find("weartak_location")
+    if elem is None:
+        return None
+    try:
+        # Not _known(): epoch milliseconds are far above CoT's 9999999
+        # "unknown" sentinel.
+        millis = float(elem.get("timeMillis") or "")
+        return datetime.fromtimestamp(millis / 1000.0, timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def parse_cot(event: bytes) -> Optional[CotReport]:
@@ -223,6 +251,14 @@ def parse_cot(event: bytes) -> Optional[CotReport]:
         time=_parse_time(root.get("time")),
         stale=_parse_time(root.get("stale")),
     )
+    report.reported_ce = report.ce
+    report.fix_time = report.time
+    if (weartak_fix := _weartak_fix_time(detail)) is not None:
+        report.fix_time = weartak_fix
+        if report.time is not None:
+            report.fix_age_s = max(0.0, (report.time - weartak_fix).total_seconds())
+        if report.ce is not None:
+            report.ce = max(report.ce - WEARTAK_CE_GROWTH * report.fix_age_s, 1.0)
     if detail is not None:
         status = detail.find("status")
         if status is not None and (battery := _known(status.get("battery"))) is not None:

@@ -37,7 +37,7 @@ from .tracker import CallsignTracker
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.DEVICE_TRACKER, Platform.SENSOR]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.DEVICE_TRACKER, Platform.SENSOR]
 
 Ha2TakConfigEntry = ConfigEntry[Ha2TakRuntime]
 

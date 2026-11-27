@@ -50,6 +50,8 @@ from .const import (
     CONF_ENROLLMENT_PORT,
     CONF_ENTITIES,
     CONF_INTERVAL,
+    CONF_MAX_ACCURACY,
+    CONF_MAX_FIX_AGE,
     CONF_MODE,
     CONF_NAME,
     CONF_PROTOCOL,
@@ -69,6 +71,8 @@ from .const import (
     DEFAULT_ENROLLMENT_PORT,
     DEFAULT_INTERVAL,
     DEFAULT_MARKER_TYPE,
+    DEFAULT_MAX_ACCURACY,
+    DEFAULT_MAX_FIX_AGE,
     DEFAULT_PORT,
     DEFAULT_STALE,
     DEFAULT_TEAM_COLOR,
@@ -526,6 +530,8 @@ class Ha2TakOptionsFlow(OptionsFlow):
                     CONF_INTERVAL: int(user_input[CONF_INTERVAL]),
                     CONF_STALE: int(user_input[CONF_STALE]),
                     CONF_SEND_ON_UPDATE: user_input[CONF_SEND_ON_UPDATE],
+                    CONF_MAX_FIX_AGE: int(user_input[CONF_MAX_FIX_AGE]),
+                    CONF_MAX_ACCURACY: int(user_input[CONF_MAX_ACCURACY]),
                 }
             )
         schema = vol.Schema(
@@ -557,6 +563,30 @@ class Ha2TakOptionsFlow(OptionsFlow):
                     CONF_SEND_ON_UPDATE,
                     default=options.get(CONF_SEND_ON_UPDATE, False),
                 ): BooleanSelector(),
+                vol.Required(
+                    CONF_MAX_FIX_AGE,
+                    default=options.get(CONF_MAX_FIX_AGE, DEFAULT_MAX_FIX_AGE),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0,
+                        max=MAX_INTERVAL,
+                        step=1,
+                        unit_of_measurement="s",
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_MAX_ACCURACY,
+                    default=options.get(CONF_MAX_ACCURACY, DEFAULT_MAX_ACCURACY),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=1,
+                        max=100000,
+                        step=1,
+                        unit_of_measurement="m",
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
             }
         )
         return self.async_show_form(step_id="settings", data_schema=schema)
